@@ -174,7 +174,7 @@ async function createIncident(body, headers) {
     const chatSpan = newSpan(st, 'chat incident-plan', 3, agent.spanId, { 'gen_ai.operation.name': 'chat', 'gen_ai.request.model': MODEL_LABEL });
     st.plan = await makePlan(body, { secrets, log });
     setAttr(chatSpan, 'gen_ai.request.model', st.plan.meta.model || MODEL_LABEL);
-    if (st.plan.meta.fallback && !st.plan.meta.modelOk) endSpan(chatSpan, 2, 'model_unavailable'); else endSpan(chatSpan);
+    if (st.plan.meta.fallback && !st.plan.meta.modelOk) endSpan(chatSpan, 2, 'model_unavailable' + (st.plan.meta.error ? ':' + String(st.plan.meta.error).replace(/[^A-Za-z0-9_]/g, '').slice(0, 40) : (process.env.LLM_KEY || process.env.GROQ_API_KEY ? '' : ':no_api_key'))); else endSpan(chatSpan);
     log(`plan ${body.runId.slice(0, 18)} cause=${st.plan.rootCause} diag=${st.plan.diagnostics.map(d => d.toolName).join(',')} effect=${st.plan.effect?.toolName} model=${st.plan.meta.model}${st.plan.meta.fallback ? ' (local fallback)' : ''}`);
     const dispatches = [];
     for (const d of st.plan.diagnostics) {
