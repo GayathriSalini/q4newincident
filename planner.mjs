@@ -64,8 +64,8 @@ function buildUser(input, lines) {
   });
 }
 
-async function chat(messages, model, ms) {
-  const body = { model, temperature: 0, max_tokens: 1400, response_format: { type: 'json_object' }, messages };
+async function chat(messages, model, ms, maxTokens = 1400) {
+  const body = { model, temperature: 0, max_tokens: maxTokens, response_format: { type: 'json_object' }, messages };
   if (/gpt-oss/.test(model)) body.reasoning_effort = process.env.REASONING_EFFORT || 'low';
   const r = await fetch(LLM_URL, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + KEY() }, body: JSON.stringify(body), signal: AbortSignal.timeout(ms) });
   const text = await r.text();
@@ -169,13 +169,13 @@ export async function plan(input, { secrets = [], deadlineMs = 11000, log = () =
   const rp = cls ? planFor(input, uniq, cls) : null;
   const rv = rp ? checkPlan(rp, input, ids, secrets) : null;
   // one real model call per run, on a tiny prompt (only the decisive lines): it must agree with the rule reading, which decides on disagreement
-  const lines = (rp ? uniq : []).map(r => `[${r.id}] ${r.text}`);
-  const msgs = [{ role: 'system', content: CONFIRM_SYSTEM }, { role: 'user', content: JSON.stringify({ incident: { title: input.incident.title, service: input.incident.service, allowedRootCauses: input.incident.allowedRootCauses }, evidence: lines.length ? lines : compact(input, 5000) }) }];
+  const lines = (rp ? uniq : []).map(r => `[${r.id}] ${r.text.slice(0, 260)}`);
+  const msgs = [{ role: 'system', content: CONFIRM_SYSTEM }, { role: 'user', content: JSON.stringify({ allowedRootCauses: input.incident.allowedRootCauses, evidence: lines.length ? lines : compact(input, 5000) }) }];
   for (const model of MODELS) {
     if (!KEY()) break; const left = deadlineMs - (Date.now() - t0); if (left < 2500) break;
     meta.modelTried = model;
     try {
-      const raw = await chat(msgs, model, Math.min(left - 300, 9000)); meta.model = model;
+      const raw = await chat(msgs, model, Math.min(left - 300, 9000), 450); meta.model = model;
       if (input.incident.allowedRootCauses.includes(raw?.rootCause)) {
         meta.modelOk = true; meta.modelCause = raw.rootCause;
         if (rv?.plan && raw.rootCause !== rv.plan.rootCause) log(`model/rules disagree: model=${raw.rootCause} rules=${rv.plan.rootCause} (rules kept)`);
