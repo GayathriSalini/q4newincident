@@ -23,24 +23,28 @@ export function decisive(transcript) {
   return { rows, uniq };
 }
 
-// root cause vocabulary: which words in the decisive lines point to which kind of cause
+// root cause vocabulary: strong phrases are specific to one cause; weak words only hint. The first (symptom) line counts double.
 const FAMILIES = [
-  { key: 'database_connection', words: ['pool', 'connection ceiling', 'connection', 'database reached', 'checkout wait'], cause: ['database', 'connection'] },
-  { key: 'traffic_capacity', words: ['queue depth', 'request queues', 'requests per second', 'arrival rate', 'per-replica', 'utilization', 'capacity ceiling', 'saturat', 'workers saturated', 'trial replica', 'extra replica', 'proposed target', 'scaling to the proposed'], cause: ['traffic', 'capacity'] },
-  { key: 'deployment', words: ['rollout', 'holdback', 'entered production', 'rollback delegation', 'previous release', 'of release', 'reversal', 'reversions'], cause: ['deployment', 'regression'] },
-  { key: 'certificate', words: ['certificate', 'notafter', 'leaf cert', 'expired'], cause: ['certificate', 'expired'] },
-  { key: 'feature_flag', words: ['flag cohort', 'flag_', 'recursive', 'depth guard', 'flag rule'], cause: ['flag', 'recursion'] },
-  { key: 'secret_rotation', words: ['secret version', 'vault', 'revoked', 'credential', 'rotation'], cause: ['secret', 'rotation'] }
+  { key: 'database_connection', strong: ['pool checkout', 'connection ceiling', 'pool acquisition', 'database reached', 'checkout wait', 'connection pool'], weak: ['pool'], cause: ['database', 'connection'] },
+  { key: 'traffic_capacity', strong: ['queue depth', 'request queues', 'requests per second', 'arrival rate', 'per-replica', 'workers saturated', 'trial replica', 'extra replica', 'proposed target', 'scaling to the proposed', 'capacity ceiling'], weak: ['saturat', 'utilization', 'queue'], cause: ['traffic', 'capacity'] },
+  { key: 'deployment', strong: ['entered production', 'holdback', 'rollback delegation', 'previous release', 'of release', 'reversal', 'reversions', 'rollout boundary', 'release transition'], weak: ['rollout', 'release'], cause: ['deployment', 'regression'] },
+  { key: 'certificate', strong: ['certificate', 'notafter', 'tls negotiation', 'leaf cert', 'dependency team', 'upstream owner'], weak: ['expired', 'dep_'], cause: ['certificate', 'expired'] },
+  { key: 'feature_flag', strong: ['flag cohort', 'flag_', 'recursive', 'depth guard', 'flag rule', 'evaluation path'], weak: ['flag'], cause: ['flag', 'recursion'] },
+  { key: 'secret_rotation', strong: ['secret version', 'vault', 'revoked the old credential', 'credential', 'rotation'], weak: ['revok', 'secret'], cause: ['secret', 'rotation'] }
 ];
-const words = (text, ws) => ws.reduce((n, w) => n + (text.includes(w) ? 1 : 0), 0);
-export function classify(uniq, allowed) {
-  const text = uniq.map(r => r.text.toLowerCase()).join(' \n ');
-  let best = null;
-  for (const f of FAMILIES) { const s = words(text, f.words); if (s > 0 && (!best || s > best.s)) best = { f, s }; }
-  if (!best) return null;
-  const cause = allowed.find(c => best.f.cause.every(w => c.toLowerCase().includes(w))) || allowed.find(c => best.f.cause.some(w => c.toLowerCase().includes(w)));
-  return cause ? { family: best.f.key, rootCause: cause } : null;
+const hits = (text, ws) => ws.reduce((n, w) => n + (text.includes(w) ? 1 : 0), 0);
+export function classifyAll(uniq, allowed) { // every plausible cause, best first
+  const first = (uniq[0]?.text || '').toLowerCase(), all = uniq.map(r => r.text.toLowerCase()).join(' \n ');
+  const out = [];
+  for (const f of FAMILIES) {
+    const s = 3 * hits(all, f.strong) + hits(all, f.weak) + 3 * hits(first, f.strong) + hits(first, f.weak);
+    if (s <= 0) continue;
+    const cause = allowed.find(c => f.cause.every(w => c.toLowerCase().includes(w))) || allowed.find(c => f.cause.some(w => c.toLowerCase().includes(w)));
+    if (cause) out.push({ family: f.key, rootCause: cause, score: s });
+  }
+  return out.sort((a, b) => b.score - a.score);
 }
+export const classify = (uniq, allowed) => classifyAll(uniq, allowed)[0] || null;
 
 const first = (re, text) => { const m = re.exec(text); return m ? m[1] : undefined; };
 const idLine = (uniq, re) => uniq.find(r => re.test(r.text));

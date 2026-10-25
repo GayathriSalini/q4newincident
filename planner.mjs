@@ -11,7 +11,7 @@ const STOP = new Set(['the', 'and', 'for', 'with', 'from', 'that', 'this', 'serv
 const OPS_WORDS = /\b(error|errors|latency|p9\d|timeout|saturat|cpu|memory|oom|restart|crash|deploy|deployment|rollback|release|version|canary|flag|feature|config|replica|replicas|scale|scaling|limit|max|quota|capacity|pool|connection|queue|backlog|disk|dns|certificate|cert|5\d\d|spike|regress|began|started|after|before|since|increase|decrease|threshold|alert|metric|owner|page)\b/i;
 const INJECTION = /ignore (all |any |the )?(previous|prior|above)|system prompt|disregard (the )?(rules|instructions)|you are now|developer message|reveal .*(token|secret)/i;
 
-import { parseEvidence, decisive, classify, planFor } from './rules.mjs';
+import { parseEvidence, decisive, classifyAll, planFor } from './rules.mjs';
 export { parseEvidence };
 const tokens = s => String(s).toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length >= 3 && !STOP.has(t));
 
@@ -123,20 +123,26 @@ export function checkPlan(plan, input, ids, secrets) {
 function fillArgs(tool, input, lines) {
   const s = tool.inputSchema || {}; const props = s.properties || {}; const out = {};
   const text = lines.join('\n') + '\n' + String(input.incident.transcript || '').slice(0, 60000);
-  for (const [k, p] of Object.entries(props)) {
-    if (!(s.required || []).includes(k) && !/service|deployment|flag|region/i.test(k)) continue;
-    let v;
-    if (/service|app|component/i.test(k)) v = input.incident.service;
-    else if (/deploy|release|build|version/i.test(k)) v = (/\b(deploy(?:ment)?[-_ ]?id[:= ]+|release[:= ]+|version[:= ]+)([\w.-]+)/i.exec(text) || [])[2] || (/\b(v?\d+\.\d+\.\d+[\w.-]*)\b/.exec(text) || [])[1];
-    else if (/flag|feature/i.test(k)) v = (/\b(?:flag|feature)[ _:=-]+([a-z0-9_.-]{3,})/i.exec(text) || [])[1];
+  const keys = [...new Set([...(s.required || []), ...Object.keys(props).filter(k => /service|deployment|flag|region/i.test(k))])];
+  for (const k of keys) {
+    const p = props[k] || {}; let v;
+    if (/^service$|service|app|component/i.test(k)) v = input.incident.service;
+    else if (/dependency/i.test(k)) v = (/\b(dep_[A-Za-z0-9]+)/.exec(text) || [])[1];
+    else if (/^release$|deploy|build|version/i.test(k)) v = (/holdback (?:still )?(?:running|on) (r\d+-\w+)/i.exec(text) || /previous release (r\d+-\w+)/i.exec(text) || /\b(r\d+-[A-Za-z0-9]+)\b/.exec(text) || [])[1];
+    else if (/flag|feature/i.test(k)) v = (/\b(flag_[A-Za-z0-9]+)/.exec(text) || [])[1];
+    else if (/target|replica|count/i.test(k)) v = Number((/proposed target=(\d+)/i.exec(text) || /exactly (\d+)\s+(?:application\s+)?replicas?/i.exec(text) || [])[1]) || undefined;
+    else if (/severity/i.test(k)) v = input.incident.severity || 'SEV-1';
+    else if (/window|minute|duration|period/i.test(k)) v = 30;
+    else if (/metric/i.test(k)) v = 'error_rate';
+    else if (/query/i.test(k)) v = 'errors ' + input.incident.service;
+    else if (/topic/i.test(k)) v = 'incident response';
+    else if (/reason/i.test(k)) v = 'no_external_effect_justified';
     else if (/region|zone/i.test(k)) v = (/\b((?:us|eu|ap|sa|ca|me|af)-[a-z]+-\d)\b/i.exec(text) || [])[1];
-    else if (/window|minute|duration|period/i.test(k)) v = 15;
-    else if (/replica|count|target/i.test(k)) v = undefined;
-    if (p?.enum) v = p.enum.find(e => text.toLowerCase().includes(String(e).toLowerCase())) ?? p.enum[0];
-    if (v === undefined) v = p?.type === 'integer' || p?.type === 'number' ? 1 : input.incident.service;
-    out[k] = p?.type === 'integer' && typeof v === 'string' ? Number(v) || 1 : v;
+    if (p.enum) v = p.enum.find(e => text.toLowerCase().includes(String(e).toLowerCase())) ?? v ?? p.enum[0];
+    if (v === undefined) v = p.type === 'integer' || p.type === 'number' ? 1 : input.incident.service;
+    out[k] = v;
   }
-  return coerceArgs(tool, out).args || out;
+  return out;
 }
 
 export function localPlan(input, ids) {
@@ -165,9 +171,11 @@ export async function plan(input, { secrets = [], deadlineMs = 11000, log = () =
   const { ids } = parseEvidence(input.incident.transcript);
   const t0 = Date.now(); const meta = { modelTried: null, modelOk: false, error: null };
   const { uniq } = decisive(input.incident.transcript);
-  const cls = uniq.length >= 2 && uniq.length <= 8 ? classify(uniq, input.incident.allowedRootCauses) : null;
-  const rp = cls ? planFor(input, uniq, cls) : null;
-  const rv = rp ? checkPlan(rp, input, ids, secrets) : null;
+  let rp = null, rv = null;
+  if (uniq.length >= 2 && uniq.length <= 8) for (const cls of classifyAll(uniq, input.incident.allowedRootCauses)) { // best cause first; fall through if it cannot produce a complete plan
+    const cand = planFor(input, uniq, cls); const v = cand ? checkPlan(cand, input, ids, secrets) : null;
+    if (v?.plan) { rp = cand; rv = v; break; }
+  }
   // one real model call per run, on a tiny prompt (only the decisive lines): it must agree with the rule reading, which decides on disagreement
   const lines = (rp ? uniq : []).map(r => `[${r.id}] ${r.text.slice(0, 260)}`);
   const msgs = [{ role: 'system', content: CONFIRM_SYSTEM }, { role: 'user', content: JSON.stringify({ allowedRootCauses: input.incident.allowedRootCauses, evidence: lines.length ? lines : compact(input, 5000) }) }];
