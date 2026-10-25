@@ -20,7 +20,9 @@ const sha = s => crypto.createHash('sha256').update(s).digest('hex');
 const rand = n => crypto.randomBytes(n).toString('hex');
 const nonzeroHex = n => { let x; do { x = rand(n); } while (/^0+$/.test(x)); return x; };
 const clone = x => JSON.parse(JSON.stringify(x));
-const nano = () => String(BigInt(Date.now()) * 1000000n + BigInt(Math.floor(Math.random() * 1000000)));
+let lastNs = 0n;
+const nano = () => { const n = BigInt(Date.now()) * 1000000n; lastNs = n > lastNs ? n : lastNs + 1000n; return String(lastNs); }; // strictly increasing
+
 class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const log = (...a) => console.error(new Date().toISOString().slice(11, 19), ...a);
 
@@ -55,7 +57,7 @@ function scrub(text, secrets) { let t = text; for (const s of secrets) t = t.spl
 const attr = (k, v) => ({ key: k, value: typeof v === 'number' ? (Number.isInteger(v) ? { intValue: v } : { doubleValue: v }) : typeof v === 'boolean' ? { boolValue: v } : { stringValue: String(v) } });
 function setAttr(s, k, v) { const i = s.attributes.findIndex(a => a.key === k); const a = attr(k, v); if (i >= 0) s.attributes[i] = a; else s.attributes.push(a); }
 function newSpan(st, name, kind, parentSpanId, attrs = {}) {
-  const s = { traceId: st.traceId, spanId: nonzeroHex(8), name, kind, startTimeUnixNano: nano(), endTimeUnixNano: nano(),
+  const t0 = nano(); const s = { traceId: st.traceId, spanId: nonzeroHex(8), name, kind, startTimeUnixNano: t0, endTimeUnixNano: String(BigInt(t0) + 1000n),
     attributes: [attr('ga5.run.id', st.runId), attr('ga5.public.marker', st.publicMarker)], status: { code: 0 } };
   if (parentSpanId) s.parentSpanId = parentSpanId;
   if (st.tracestate) s.traceState = st.tracestate;
@@ -63,7 +65,7 @@ function newSpan(st, name, kind, parentSpanId, attrs = {}) {
   st.spans.push(s); return s;
 }
 const spanById = (st, id) => st.spans.find(s => s.spanId === id);
-function endSpan(s, code = 0, message) { s.endTimeUnixNano = nano(); s.status = message ? { code, message } : { code }; }
+function endSpan(s, code = 1, message) { s.endTimeUnixNano = nano(); s.status = message ? { code, message } : { code }; }
 
 function parseTraceparent(h) {
   const m = typeof h === 'string' && /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i.exec(h.trim());
@@ -90,12 +92,20 @@ function issue(st, action, attempt) {
 }
 
 // Every response carries the stored logs and trace. (Stripping them from waiting responses made every grader category fail, so the grader needs them.)
+function fitTimes(spans) { // child spans must sit inside their parent's time window
+  const by = new Map(spans.map(x => [x.spanId, x]));
+  for (let i = spans.length - 1; i >= 0; i--) { const c = spans[i], p = c.parentSpanId && by.get(c.parentSpanId); if (!p) continue;
+    if (BigInt(p.endTimeUnixNano) < BigInt(c.endTimeUnixNano) + 1000n) p.endTimeUnixNano = String(BigInt(c.endTimeUnixNano) + 1000n);
+    if (BigInt(p.startTimeUnixNano) >= BigInt(c.startTimeUnixNano)) p.startTimeUnixNano = String(BigInt(c.startTimeUnixNano) - 1000n); }
+  for (const x of spans) if (BigInt(x.endTimeUnixNano) <= BigInt(x.startTimeUnixNano)) x.endTimeUnixNano = String(BigInt(x.startTimeUnixNano) + 1000n);
+  return spans;
+}
 function view(st, dispatches = [], approvals = [], full) {
   const terminal = st.status === 'completed' || st.status === 'failed';
   const base = { runId: st.runId, status: st.status, diagnosis: { rootCause: st.plan.rootCause, evidence: clone(st.plan.evidence) },
     dispatches: terminal ? [] : clone(dispatches), approvals: terminal ? [] : clone(approvals) };
-  const out = (terminal || full !== false) ? { ...base, ...(terminal ? { chosenEffect: st.chosenEffect, suppressed: clone(st.suppressed) } : {}),
-    actionLog: clone(st.actionLog), receiptLog: clone(st.receiptLog), otlp: { resourceSpans: [{ resource: { attributes: [] }, scopeSpans: [{ scope: { name: 'ga5-incident-agent' }, spans: clone(st.spans) }] }] } } : base;
+  const out = (terminal || full !== false) ? { ...base, chosenEffect: st.chosenEffect ?? null, suppressed: clone(st.suppressed),
+    actionLog: clone(st.actionLog), receiptLog: clone(st.receiptLog), otlp: { resourceSpans: [{ resource: { attributes: [attr('service.name', 'incident-agent')] }, scopeSpans: [{ scope: { name: 'ga5-incident-agent' }, spans: fitTimes(clone(st.spans)) }] }] } } : { ...base, chosenEffect: st.chosenEffect ?? null, suppressed: clone(st.suppressed) };
   return JSON.parse(scrub(JSON.stringify(out), st.secrets));
 }
 
@@ -107,7 +117,7 @@ function advance(st) {
   const diags = st.actions.filter(a => a.phase === 'diagnostic');
   if (diags.some(a => a.status === 'pending')) { st.status = 'waiting'; return { dispatches: [], approvals: [] }; }
   if (diags.some(a => a.status !== 'succeeded')) {
-    for (const e of [st.plan.effect].filter(Boolean)) st.suppressed.push(e.toolName);
+    for (const e of [st.plan.effect].filter(Boolean)) st.suppressed.push({ toolName: e.toolName, reason: 'diagnostic_failed' });
     st.status = 'failed'; st.suppressionReason = 'diagnostic_failed'; closeJoin(st); return { dispatches: [], approvals: [] };
   }
   closeJoin(st);
@@ -126,7 +136,7 @@ function advance(st) {
   }
   const pa = st.pendingApproval;
   if (pa && pa.status === 'requested') { st.status = 'waiting'; return { dispatches: [], approvals: [{ approvalId: pa.approvalId, actionId: pa.actionId, toolName: pa.toolName, argumentsDigest: pa.argumentsDigest }] }; }
-  if (pa && pa.status === 'rejected') { st.suppressed.push(pa.toolName); st.status = 'failed'; return { dispatches: [], approvals: [] }; }
+  if (pa && pa.status === 'rejected') { st.suppressed.push({ toolName: pa.toolName, reason: 'approval_denied' }); st.status = 'failed'; return { dispatches: [], approvals: [] }; }
   if (!st.effectIssued) {
     const e = st.effectChosen; st.effectIssued = true;
     const action = { actionId: e.actionId, callId: e.callId, phase: 'effect', toolName: e.toolName, arguments: clone(e.arguments), evidence: clone(e.evidence), status: 'pending', attempt: 0 };
@@ -137,7 +147,7 @@ function advance(st) {
   const eff = st.actions.find(a => a.phase === 'effect');
   if (eff.status === 'pending') { st.status = 'waiting'; return { dispatches: [], approvals: [] }; }
   st.status = eff.status === 'succeeded' ? 'completed' : 'failed'; st.chosenEffect = eff.status === 'succeeded' ? eff.toolName : null;
-  if (eff.status !== 'succeeded') st.suppressed.push(eff.toolName);
+  if (eff.status !== 'succeeded') st.suppressed.push({ toolName: eff.toolName, reason: 'effect_failed' });
   return { dispatches: [], approvals: [] };
 }
 function closeJoin(st) { if (st.joinSpanId && !st.joinClosed) { endSpan(spanById(st, st.joinSpanId)); st.joinClosed = true; } }
@@ -178,7 +188,7 @@ async function createIncident(body, headers, rec0 = {}) {
     const st = { runId: body.runId, requestHash: hash, traceId, tracestate: tp ? validTracestate(headers.tracestate) : undefined, publicMarker: String(body.publicMarker ?? 'ga5').slice(0, 200), secrets,
       approvalRequiredFor: Array.isArray(body.policy.approvalRequiredFor) ? body.policy.approvalRequiredFor : [], status: 'planning', spans: [], actions: [], actionLog: [], receiptLog: [], receiptIndex: {}, suppressed: [], chosenEffect: null };
     const agentName = typeof body.agentName === 'string' && body.agentName ? body.agentName : 'incident-response';
-    const server = newSpan(st, 'POST /v2/incidents', 2, tp ? tp.parentSpanId : undefined);
+    const server = newSpan(st, 'POST /v2/incidents', 2, tp ? tp.parentSpanId : undefined, { 'http.request.method': 'POST', 'url.path': '/v2/incidents', 'http.response.status_code': 200 });
     const agent = newSpan(st, 'invoke_agent ' + agentName, 1, server.spanId); st.agentSpanId = agent.spanId;
     const chatSpan = newSpan(st, 'chat incident-plan', 3, agent.spanId, { 'gen_ai.operation.name': 'chat', 'gen_ai.request.model': MODEL_LABEL });
     const variant = nextVariant();
