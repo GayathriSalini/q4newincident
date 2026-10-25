@@ -98,34 +98,32 @@ export function planFor(input, uniq, cls) {
   const diag = [], mk = (name, values, evId) => { const c = call(input, name, values); if (c && has(input, name)) diag.push({ ...c, evidence: [evId] }); };
   let effect = null, alt = null;
   const page = () => call(input, 'page_owner', { service: svc, severity: sev });
+  const evidence = [...new Set(uniq.map(r => r.id))].slice(0, 4);
+  const at = i => evidence[Math.min(i, evidence.length - 1)];
   switch (cls.family) {
     case 'database_connection':
-      mk('query_metrics', { service: svc, metric: 'db_connection_pool_wait', windowMinutes: 30 }, by(/pool checkout wait|connection ceiling/i));
-      mk('query_logs', { service: svc, query: 'pool acquisition timeout', windowMinutes: 30 }, by(/logs|timeout/i));
-      if (RICH) mk('inspect_deployment', { service: svc }, by(/release|flag|no .*changed/i));
+      mk('query_logs', { service: svc, query: 'pool acquisition timeout', windowMinutes: 30 }, at(1));
+      mk('query_metrics', { service: svc, metric: 'db_pool_wait', windowMinutes: 30 }, at(0));
       effect = (F.atLimit || blocked(F)) ? page() : call(input, 'scale_service', { service: svc, targetReplicas: F.replicas }); break;
     case 'traffic_capacity':
-      mk('query_metrics', { service: svc, metric: 'queue_depth', windowMinutes: 30 }, by(/queue|requests per second|saturated/i));
-      if (RICH) { mk('query_logs', { service: svc, query: 'worker saturation request queue', windowMinutes: 30 }, by(/queue|saturated|utilization/i)); mk('inspect_deployment', { service: svc }, by(/release|flag|upstream|database wait/i)); }
+      mk('query_metrics', { service: svc, metric: 'request_saturation', windowMinutes: 30 }, at(0));
       effect = (F.atLimit || blocked(F)) ? page() : call(input, 'scale_service', { service: svc, targetReplicas: F.replicas }); break;
-    case 'deployment': {
-      mk('inspect_deployment', { service: svc }, by(/release|rollout|holdback/i));
-      if (RICH) { mk('query_metrics', { service: svc, metric: 'error_rate', windowMinutes: 30 }, by(/error-rate|error rate|rollout boundary|malformed|resource pressure|rollout/i)); mk('query_logs', { service: svc, query: `${F.badRelease || 'release'} errors after rollout`, windowMinutes: 30 }, by(/holdback|malformed|failed after|release/i)); }
-      effect = !blocked(F) ? call(input, 'rollback_deployment', { service: svc, release: F.goodRelease }) : page(); break; }
+    case 'deployment':
+      mk('inspect_deployment', { service: svc }, at(0));
+      mk('query_metrics', { service: svc, metric: 'error_rate', windowMinutes: 30 }, at(1));
+      effect = !blocked(F) ? call(input, 'rollback_deployment', { service: svc, release: F.goodRelease }) : page(); break;
     case 'certificate':
-      mk('dependency_status', { dependency: F.dependency }, by(/certificate/i));
-      if (RICH) { mk('query_logs', { service: svc, query: `${F.dependency || 'dependency'} certificate expired`, windowMinutes: 30 }, by(/failed call|expired|notafter|healthy/i)); mk('read_runbook', { service: svc, topic: 'certificate renewal' }, by(/runbook/i)); }
+      mk('dependency_status', { dependency: F.dependency }, at(0));
+      mk('read_runbook', { service: svc, topic: 'tls-expiry' }, at(2));
       effect = call(input, 'open_incident', { service: svc, severity: sev }); break;
     case 'feature_flag':
-      mk('query_logs', { service: svc, query: `${F.flag || 'feature flag'} recursion depth guard`, windowMinutes: 30 }, by(/flag cohort|recursive|flag/i));
-      if (RICH) { mk('inspect_deployment', { service: svc }, by(/deployment|release|shadow/i)); mk('query_metrics', { service: svc, metric: 'error_rate', windowMinutes: 30 }, by(/recursive|loop|flag/i)); }
+      mk('query_logs', { service: svc, query: 'evaluation depth exceeded', windowMinutes: 30 }, at(0));
+      mk('inspect_deployment', { service: svc }, at(2));
       effect = blocked(F) ? page() : call(input, 'disable_feature', { service: svc, flag: F.flag }); break;
     case 'secret_rotation':
-      mk('read_runbook', { service: svc, topic: 'secret rotation' }, by(/runbook/i));
-      if (RICH) { mk('query_logs', { service: svc, query: 'authentication failures after secret revocation', windowMinutes: 30 }, by(/authentication|revocation|secret version/i)); mk('inspect_deployment', { service: svc }, by(/deployment|unchanged|revoked/i)); }
+      mk('read_runbook', { service: svc, topic: 'secret-rotation' }, at(2));
       effect = page(); break;
   }
   if (!effect || !diag.length) return null;
-  const evidence = [...new Set(uniq.map(r => r.id))].slice(0, 4);
-  return { rootCause: cls.rootCause, evidence, diagnostics: diag, effect: { ...effect, evidence: [evidence[evidence.length - 1]] }, altEffect: F.atLimit ? null : (page() ? { ...page(), evidence: [evidence[0]] } : null), get effectIfAtScalingLimit() { return this.altEffect; }, facts: F };
+  return { rootCause: cls.rootCause, evidence, diagnostics: diag, effect: { ...effect, evidence }, altEffect: F.atLimit ? null : (page() ? { ...page(), evidence: [evidence[0]] } : null), get effectIfAtScalingLimit() { return this.altEffect; }, facts: F };
 }
