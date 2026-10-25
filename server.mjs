@@ -250,7 +250,7 @@ function postReceipt(runId, r) {
   for (const ap of approvals) {
     const pa = st.pendingApproval; pa.status = ap.decision === 'approved' ? 'approved' : 'rejected'; pa.nonce = ap.nonce;
     st.receiptLog.push({ receiptId: r.receiptId, approvalId: ap.approvalId, decision: ap.decision, nonce: ap.nonce });
-    const gate = spanById(st, pa.gateSpanId); if (gate) { setAttr(gate, 'ga5.approval.receipt.nonce', ap.nonce); setAttr(gate, 'ga5.approval.decision', ap.decision); endSpan(gate, 0); }
+    const gate = spanById(st, pa.gateSpanId); if (gate) { setAttr(gate, 'ga5.approval.receipt.nonce', ap.nonce); setAttr(gate, 'ga5.approval.decision', ap.decision); setAttr(gate, 'ga5.receipt.id', r.receiptId); setAttr(gate, 'ga5.receipt.nonce', ap.nonce); endSpan(gate, 1); }
   }
   for (const o of outcomes) {
     const a = st.actions.find(x => x.actionId === o.actionId && x.callId === o.callId);
@@ -265,7 +265,7 @@ function postReceipt(runId, r) {
     else if (o.status >= 200 && o.status < 300) { setAttr(cl, 'http.response.status_code', o.status); endSpan(cl, 1); a.status = 'succeeded'; }
     else { setAttr(cl, 'http.response.status_code', o.status); setAttr(cl, 'error.type', String(o.status)); endSpan(cl, 2, String(o.status)); a.status = 'failed'; }
     if (a.status !== 'pending' || retries.includes(a)) { /* resolved or being retried */ }
-    if (a.status === 'failed' || a.status === 'succeeded') { const ex = spanById(st, a.execSpanId); endSpan(ex, a.status === 'failed' ? 2 : 0, a.status === 'failed' ? 'failed' : undefined); }
+    if (a.status === 'failed' || a.status === 'succeeded') { const ex = spanById(st, a.execSpanId); endSpan(ex, a.status === 'failed' ? 2 : 1, a.status === 'failed' ? 'failed' : undefined); }
   }
   let dispatches = [], approvalsOut = [];
   if (retries.length) { for (const a of retries) dispatches.push(issue(st, a, 2)); st.status = 'waiting'; }
