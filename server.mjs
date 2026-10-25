@@ -94,7 +94,7 @@ function view(st, dispatches = [], approvals = [], full) {
   const terminal = st.status === 'completed' || st.status === 'failed';
   const base = { runId: st.runId, status: st.status, diagnosis: { rootCause: st.plan.rootCause, evidence: clone(st.plan.evidence) },
     dispatches: terminal ? [] : clone(dispatches), approvals: terminal ? [] : clone(approvals) };
-  const out = (terminal || full || true) ? { ...base, ...(terminal ? { chosenEffect: st.chosenEffect, suppressed: clone(st.suppressed) } : {}),
+  const out = (terminal || full !== false) ? { ...base, ...(terminal ? { chosenEffect: st.chosenEffect, suppressed: clone(st.suppressed) } : {}),
     actionLog: clone(st.actionLog), receiptLog: clone(st.receiptLog), otlp: { resourceSpans: [{ resource: { attributes: [] }, scopeSpans: [{ scope: { name: 'ga5-incident-agent' }, spans: clone(st.spans) }] }] } } : base;
   return JSON.parse(scrub(JSON.stringify(out), st.secrets));
 }
@@ -143,6 +143,15 @@ function advance(st) {
 function closeJoin(st) { if (st.joinSpanId && !st.joinClosed) { endSpan(spanById(st, st.joinSpanId)); st.joinClosed = true; } }
 
 const inflight = new Map(); // runId -> Promise (creation in progress)
+// Experiment switch: VARIANT_MODE=bisect gives the n-th run of a batch a different (shape, evidence, diagnostics) combination so the
+// grader's behaviour can be compared across combinations in a single Check. Default 'off' = production behaviour.
+const VARIANTS = [['full', 3, 1], ['full', 2, 3], ['min', 3, 3], ['min', 2, 1], ['full', 3, 3], ['min', 3, 1], ['full', 2, 1], ['min', 2, 3]];
+let variantCounter = 0, variantStamp = 0;
+function nextVariant() {
+  if ((process.env.VARIANT_MODE || 'off') !== 'bisect') return null;
+  const now = Date.now(); if (now - variantStamp > 30000) variantCounter = 0; variantStamp = now; // a new batch starts after a pause
+  return VARIANTS[variantCounter++ % VARIANTS.length];
+}
 
 function validateCreate(b) {
   if (!b || typeof b !== 'object' || Array.isArray(b)) throw new HttpError(400, 'expected_json_object');
@@ -155,7 +164,7 @@ function validateCreate(b) {
   if (!b.policy || typeof b.policy !== 'object' || Array.isArray(b.policy) || !Array.isArray(b.policy.effectTools)) throw new HttpError(422, 'invalid_policy');
 }
 
-async function createIncident(body, headers) {
+async function createIncident(body, headers, rec0 = {}) {
   validateCreate(body);
   const hash = sha(canonical(body));
   const prior = load(body.runId);
@@ -172,7 +181,17 @@ async function createIncident(body, headers) {
     const server = newSpan(st, 'POST /v2/incidents', 2, tp ? tp.parentSpanId : undefined);
     const agent = newSpan(st, 'invoke_agent ' + agentName, 1, server.spanId); st.agentSpanId = agent.spanId;
     const chatSpan = newSpan(st, 'chat incident-plan', 3, agent.spanId, { 'gen_ai.operation.name': 'chat', 'gen_ai.request.model': MODEL_LABEL });
+    const variant = nextVariant();
     st.plan = await makePlan(body, { secrets, log });
+    if (variant) { // trim the plan to the assigned combination (evidence count, diagnostic count)
+      const [, evN, dN] = variant; st.variant = variant.join('/');
+      st.plan.evidence = st.plan.evidence.slice(0, evN);
+      const keep = (ids) => { const k = (ids || []).filter(x => st.plan.evidence.includes(x)); return k.length ? k : [st.plan.evidence[0]]; };
+      st.plan.diagnostics = st.plan.diagnostics.slice(0, dN).map(d => ({ ...d, evidence: keep(d.evidence) }));
+      if (st.plan.effect) st.plan.effect.evidence = keep(st.plan.effect.evidence);
+      if (st.plan.altEffect) st.plan.altEffect.evidence = keep(st.plan.altEffect.evidence);
+      rec0.variant = st.variant; log('VARIANT ' + body.runId.slice(0, 18) + ' ' + st.variant);
+    }
     setAttr(chatSpan, 'gen_ai.request.model', st.plan.meta.model || MODEL_LABEL);
     if (st.plan.meta.fallback && !st.plan.meta.modelOk) endSpan(chatSpan, 2, 'model_unavailable' + (st.plan.meta.error ? ':' + String(st.plan.meta.error).replace(/[^A-Za-z0-9_]/g, '').slice(0, 40) : (process.env.LLM_KEY || process.env.GROQ_API_KEY ? '' : ':no_api_key'))); else endSpan(chatSpan);
     log(`plan ${body.runId.slice(0, 18)} cause=${st.plan.rootCause} diag=${st.plan.diagnostics.map(d => d.toolName).join(',')} effect=${st.plan.effect?.toolName} model=${st.plan.meta.model}${st.plan.meta.fallback ? ' (local fallback)' : ''}`);
@@ -184,7 +203,7 @@ async function createIncident(body, headers) {
     if (st.actions.length > 1) { const j = newSpan(st, 'incident.join', 1, agent.spanId); j.links = st.actions.map(a => ({ traceId: st.traceId, spanId: a.execSpanId })); st.joinSpanId = j.spanId; }
     endSpan(agent); endSpan(server);
     st.status = 'waiting';
-    st.initialResponse = view(st, dispatches, []); delete st.plan.meta;
+    st.initialResponse = view(st, dispatches, [], variant ? variant[0] === 'full' : undefined); delete st.plan.meta;
     save(st); return st.initialResponse;
   })();
   inflight.set(body.runId, { hash, p });
@@ -267,7 +286,7 @@ const server = http.createServer(async (req, res) => {
     // tolerate a path prefix on the submitted base URL and doubled slashes: route on the part from /v2/incidents onward
     let p = url.pathname.replace(/\/{2,}/g, '/').replace(/\/+$/, '') || '/'; const k = p.indexOf('/v2/incidents'); if (k > 0) p = p.slice(k);
     if ((req.method === 'GET' || req.method === 'HEAD') && (p === '/health' || p === '/')) return send(res, 200, { status: 'ok', service: 'incident-agent', message: 'Incident agent is running: POST /v2/incidents, POST /v2/incidents/{runId}/receipts, GET /v2/incidents/{runId}', commit: (process.env.RENDER_GIT_COMMIT || 'local').slice(0, 7) });
-    if (req.method === 'POST' && p === '/v2/incidents') { const b = await readBody(req); rec.run = b && String(b.runId).slice(0, 40); const r = await createIncident(b, req.headers); return send(res, r.status, r.body); }
+    if (req.method === 'POST' && p === '/v2/incidents') { const b = await readBody(req); rec.run = b && String(b.runId).slice(0, 40); const r = await createIncident(b, req.headers, rec); return send(res, r.status, r.body); }
     let m = /^\/v2\/incidents\/([^/]+)\/receipts$/.exec(p);
     if (req.method === 'POST' && m) { const b = await readBody(req); rec.reqBody = JSON.stringify(b).slice(0, 1500); return send(res, 200, postReceipt(decodeURIComponent(m[1]), b)); }
     m = /^\/v2\/incidents\/([^/]+)$/.exec(p);
