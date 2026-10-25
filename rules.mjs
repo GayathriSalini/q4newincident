@@ -58,7 +58,11 @@ export function facts(uniq, input) {
   f.dependency = first(/\b(dep_[A-Za-z0-9]+)/, text);
   const holdback = first(/holdback (?:still )?(?:running|on) (r\d+-[A-Za-z0-9]+)/i, text) || first(/previous release (r\d+-[A-Za-z0-9]+)/i, text);
   const bad = first(/after (r\d+-[A-Za-z0-9]+) entered production/i, text) || first(/release (r\d+-[A-Za-z0-9]+)/i, text.replace(/previous release r\d+-\w+/i, ''));
-  f.goodRelease = holdback; f.badRelease = bad && bad !== holdback ? bad : undefined;
+  const unchanged = first(/(?:unchanged|healthy|stable) (?:instances|replicas|hosts)(?: still)? running (r\d+-[A-Za-z0-9]+)/i, text);
+  const rollout = first(/(?:at|after|during) (?:rollout|release) (r\d+-[A-Za-z0-9]+)/i, text) || first(/rollout (r\d+-[A-Za-z0-9]+)/i, text);
+  let good = holdback || unchanged, badRel = bad && bad !== good ? bad : rollout;
+  if (!good) { const ids = [...new Set(text.match(/\br\d+-[A-Za-z0-9]+/g) || [])]; good = ids.find(i => i !== (badRel || bad)); }
+  f.goodRelease = good; f.badRelease = badRel && badRel !== good ? badRel : undefined;
   const d = /delegation=(\d)[;,]?\s*freeze=(\d)[;,]?\s*(?:remaining[^=]*=(\d+))?/i.exec(text);
   f.policy = d ? { delegation: Number(d[1]), freeze: Number(d[2]), remaining: d[3] === undefined ? 1 : Number(d[3]) } : undefined;
   f.replicas = f.replicas ?? (Number(first(/proposed target=(\d+)/i, text)) || undefined);
