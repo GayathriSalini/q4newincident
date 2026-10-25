@@ -265,7 +265,7 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     // tolerate a path prefix on the submitted base URL and doubled slashes: route on the part from /v2/incidents onward
     let p = url.pathname.replace(/\/{2,}/g, '/').replace(/\/+$/, '') || '/'; const k = p.indexOf('/v2/incidents'); if (k > 0) p = p.slice(k);
-    if (req.method === 'GET' && p === '/health') return send(res, 200, { status: 'ok' });
+    if (req.method === 'GET' && p === '/health') return send(res, 200, { status: 'ok', commit: (process.env.RENDER_GIT_COMMIT || 'local').slice(0, 7) });
     if (req.method === 'POST' && p === '/v2/incidents') { const b = await readBody(req); rec.run = b && String(b.runId).slice(0, 40); const r = await createIncident(b, req.headers); return send(res, r.status, r.body); }
     let m = /^\/v2\/incidents\/([^/]+)\/receipts$/.exec(p);
     if (req.method === 'POST' && m) { const b = await readBody(req); rec.reqBody = JSON.stringify(b).slice(0, 1500); return send(res, 200, postReceipt(decodeURIComponent(m[1]), b)); }
