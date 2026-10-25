@@ -83,7 +83,6 @@ function issue(st, action, attempt) {
   action.clientSpans.push(cl.spanId);
   const d = { actionId: action.actionId, callId: action.callId, phase: action.phase, toolName: action.toolName, arguments: clone(action.arguments), evidence: clone(action.evidence), attempt,
     traceparent: `00-${st.traceId}-${cl.spanId}-01` };
-  if (st.tracestate) d.tracestate = st.tracestate;
   if (action.approvalId) { d.approvalId = action.approvalId; d.approvalNonce = action.approvalNonce; }
   st.actionLog.push(clone(d));
   return d;
@@ -256,7 +255,8 @@ function getIncident(runId) {
 const ACCESS = path.resolve(process.env.ACCESS_LOG || './access.jsonl');
 function accessLog(rec) { const line = JSON.stringify(rec); try { fs.appendFileSync(ACCESS, line + '\n'); } catch {} if (process.env.RENDER || process.env.ACCESS_STDOUT) console.error('ACCESS ' + line); } // on Render only the console is visible
 const server = http.createServer(async (req, res) => {
-  const t0 = Date.now(); const rec = { t: new Date().toISOString(), method: req.method, url: req.url.slice(0, 300), ua: String(req.headers['user-agent'] || '').slice(0, 60), ct: req.headers['content-type'], tp: req.headers.traceparent ? 'yes' : 'no' };
+  const t0 = Date.now(); const hdr = {}; for (const [k, v] of Object.entries(req.headers)) if (!/^(authorization|cookie|cf-connecting-ip|x-forwarded-for|x-real-ip)$/i.test(k)) hdr[k] = String(v).slice(0, 120);
+  const rec = { t: new Date().toISOString(), method: req.method, url: req.url.slice(0, 300), ua: String(req.headers['user-agent'] || '').slice(0, 60), ct: req.headers['content-type'], tp: req.headers.traceparent ? 'yes' : 'no', hdr };
   const origEnd = res.end.bind(res); let outBody = '';
   res.end = (chunk, ...a) => { if (chunk) outBody = String(chunk); rec.status = res.statusCode; rec.ms = Date.now() - t0; rec.resBytes = Buffer.byteLength(outBody);
     if (res.statusCode !== 200) rec.resBody = outBody.slice(0, 400); accessLog(rec); return origEnd(chunk, ...a); };
