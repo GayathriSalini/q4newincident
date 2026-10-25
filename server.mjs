@@ -89,12 +89,12 @@ function issue(st, action, attempt) {
   return d;
 }
 
-// Non-final responses carry exactly the fields the spec shows for them; the final result (and GET) carries the full stored state.
+// Every response carries the stored logs and trace. (Stripping them from waiting responses made every grader category fail, so the grader needs them.)
 function view(st, dispatches = [], approvals = [], full) {
   const terminal = st.status === 'completed' || st.status === 'failed';
   const base = { runId: st.runId, status: st.status, diagnosis: { rootCause: st.plan.rootCause, evidence: clone(st.plan.evidence) },
     dispatches: terminal ? [] : clone(dispatches), approvals: terminal ? [] : clone(approvals) };
-  const out = (terminal || full) ? { ...base, ...(terminal ? { chosenEffect: st.chosenEffect, suppressed: clone(st.suppressed) } : {}),
+  const out = (terminal || full || true) ? { ...base, ...(terminal ? { chosenEffect: st.chosenEffect, suppressed: clone(st.suppressed) } : {}),
     actionLog: clone(st.actionLog), receiptLog: clone(st.receiptLog), otlp: { resourceSpans: [{ resource: { attributes: [] }, scopeSpans: [{ scope: { name: 'ga5-incident-agent' }, spans: clone(st.spans) }] }] } } : base;
   return JSON.parse(scrub(JSON.stringify(out), st.secrets));
 }

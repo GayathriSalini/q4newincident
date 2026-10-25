@@ -5,3 +5,4 @@ inputs
 *.log
 access.jsonl
 _*.mjs
+keepwarm.log
