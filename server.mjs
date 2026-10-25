@@ -117,7 +117,7 @@ function advance(st) {
   const diags = st.actions.filter(a => a.phase === 'diagnostic');
   if (diags.some(a => a.status === 'pending')) { st.status = 'waiting'; return { dispatches: [], approvals: [] }; }
   if (diags.some(a => a.status !== 'succeeded')) {
-    for (const e of [st.plan.effect].filter(Boolean)) st.suppressed.push({ toolName: e.toolName, reason: 'diagnostic_failed' });
+    for (const e of [st.plan.effect].filter(Boolean)) st.suppressed.push(e.toolName);
     st.status = 'failed'; st.suppressionReason = 'diagnostic_failed'; closeJoin(st); return { dispatches: [], approvals: [] };
   }
   closeJoin(st);
@@ -136,7 +136,7 @@ function advance(st) {
   }
   const pa = st.pendingApproval;
   if (pa && pa.status === 'requested') { st.status = 'waiting'; return { dispatches: [], approvals: [{ approvalId: pa.approvalId, actionId: pa.actionId, toolName: pa.toolName, argumentsDigest: pa.argumentsDigest }] }; }
-  if (pa && pa.status === 'rejected') { st.suppressed.push({ toolName: pa.toolName, reason: 'approval_denied' }); st.status = 'failed'; return { dispatches: [], approvals: [] }; }
+  if (pa && pa.status === 'rejected') { st.suppressed.push(pa.toolName); st.status = 'failed'; return { dispatches: [], approvals: [] }; }
   if (!st.effectIssued) {
     const e = st.effectChosen; st.effectIssued = true;
     const action = { actionId: e.actionId, callId: e.callId, phase: 'effect', toolName: e.toolName, arguments: clone(e.arguments), evidence: clone(e.evidence), status: 'pending', attempt: 0 };
@@ -147,7 +147,7 @@ function advance(st) {
   const eff = st.actions.find(a => a.phase === 'effect');
   if (eff.status === 'pending') { st.status = 'waiting'; return { dispatches: [], approvals: [] }; }
   st.status = eff.status === 'succeeded' ? 'completed' : 'failed'; st.chosenEffect = eff.status === 'succeeded' ? eff.toolName : null;
-  if (eff.status !== 'succeeded') st.suppressed.push({ toolName: eff.toolName, reason: 'effect_failed' });
+  if (eff.status !== 'succeeded') st.suppressed.push(eff.toolName);
   return { dispatches: [], approvals: [] };
 }
 function closeJoin(st) { if (st.joinSpanId && !st.joinClosed) { endSpan(spanById(st, st.joinSpanId)); st.joinClosed = true; } }
@@ -178,7 +178,7 @@ async function createIncident(body, headers, rec0 = {}) {
   validateCreate(body);
   const hash = sha(canonical(body));
   const prior = load(body.runId);
-  if (prior) { if (prior.requestHash !== hash) throw new HttpError(409, 'run_conflict'); return { status: 200, body: prior.initialResponse }; }
+  if (prior) { if (prior.requestHash !== hash) throw new HttpError(409, 'run_conflict'); return { status: 200, body: getIncident(body.runId) }; }
   const running = inflight.get(body.runId);
   if (running) { if (running.hash !== hash) throw new HttpError(409, 'run_conflict'); return { status: 200, body: await running.p }; }
   const p = (async () => {
